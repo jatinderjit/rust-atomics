@@ -1,3 +1,5 @@
+use atomics::once_data;
+
 fn main() {
-    println!("Hello, world!");
+    once_data::check::run();
 }
