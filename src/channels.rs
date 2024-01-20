@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
@@ -26,25 +27,27 @@ impl<T> OneShotChannel<T> {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.ready.load(Ordering::Relaxed)
     }
 
+    /// Panics if no message is available.
+    ///
     /// Safety: Call this only once,
-    /// and that too after verifying that the value is `is_ready`.
+    ///  after verifying that the message is `is_ready`.
     pub unsafe fn receive(&self) -> T {
+        if !self.ready.load(Ordering::Acquire) {
+            panic!("No message");
+        }
         (*self.message.get()).assume_init_read()
     }
 }
 
-pub mod check {
+#[cfg(test)]
+mod test {
     use super::OneShotChannel;
     use std::{thread, time::Duration};
 
-    pub fn run() {
-        single_thread();
-        multiple_threads();
-    }
-
+    #[test]
     fn single_thread() {
         let channel = OneShotChannel::new();
         assert!(!channel.is_ready());
@@ -57,6 +60,7 @@ pub mod check {
         assert_eq!(val, 123);
     }
 
+    #[test]
     fn multiple_threads() {
         let channel = OneShotChannel::new();
         thread::scope(|s| {
@@ -77,5 +81,12 @@ pub mod check {
                 receiver.thread().unpark();
             });
         })
+    }
+
+    #[test]
+    #[should_panic(expected = "No message")]
+    fn receive_no_message() {
+        let channel = OneShotChannel::<i32>::new();
+        unsafe { channel.receive() };
     }
 }
