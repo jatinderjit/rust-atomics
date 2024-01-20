@@ -122,27 +122,47 @@ Safety through runtime checks. Fix the first problem: `receive` before `send`.
 We will panic if no message is available.
 
 ```rs
-/// Panics if no message is available.
-///
-/// Safety: Call this only once,
-///  after verifying that the message is `is_ready`.
-pub unsafe fn receive(&self) -> T {
-    if !self.ready.load(Ordering::Acquire) {
-        panic!("No message");
+    /// Panics if no message is available.
+    ///
+    /// Safety: Call this only once,
+    ///  after verifying that the message is `is_ready`.
+    pub unsafe fn receive(&self) -> T {
+        if !self.ready.load(Ordering::Acquire) {
+            panic!("No message");
+        }
+        (*self.message.get()).assume_init_read()
     }
-    (*self.message.get()).assume_init_read()
-}
 ```
 
 Since we have `Acquire` here, we can relax the ordering in `is_ready`.
 
 ```rs
-pub fn is_ready(&self) -> bool {
-    self.ready.load(Ordering::Relaxed)
-}
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
 ```
 
 Due to the **total modification order**, if `is_ready` returns `true`, then
 `receive` is guaranteed to read the value of `self.ready` as `true`, and will
 never panic if the message is `is_ready`. So the ordering used inside `is_ready`
 doesn't matter.
+
+### Version 3: Fix multiple copies (receives)
+
+We can set `self.ready` to false after reading the message. If `receive` is
+called again, then it will panic.
+
+The `receive` method no longer needs to be `unsafe`, since there is no undefined
+behavior now.
+
+```rs
+    /// Panics if no message is available.
+    ///
+    /// Call this only once, after verifying that the message is `is_ready`.
+    pub fn receive(&self) -> T {
+        if !self.ready.swap(false, Ordering::Acquire) {
+            panic!("No message");
+        }
+        unsafe { (*self.message.get()).assume_init_read() }
+    }
+```

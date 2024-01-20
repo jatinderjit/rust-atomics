@@ -34,11 +34,11 @@ impl<T> OneShotChannel<T> {
     ///
     /// Safety: Call this only once,
     ///  after verifying that the message is `is_ready`.
-    pub unsafe fn receive(&self) -> T {
-        if !self.ready.load(Ordering::Acquire) {
+    pub fn receive(&self) -> T {
+        if !self.ready.swap(false, Ordering::Acquire) {
             panic!("No message");
         }
-        (*self.message.get()).assume_init_read()
+        unsafe { (*self.message.get()).assume_init_read() }
     }
 }
 
@@ -56,7 +56,7 @@ mod test {
             channel.send(123);
         }
         assert!(channel.is_ready());
-        let val = unsafe { channel.receive() };
+        let val = channel.receive();
         assert_eq!(val, 123);
     }
 
@@ -70,7 +70,7 @@ mod test {
                 while !channel.is_ready() {
                     thread::park();
                 }
-                let val = unsafe { channel.receive() };
+                let val = channel.receive();
                 assert_eq!(val, 123);
             });
             s.spawn(move || {
@@ -87,6 +87,17 @@ mod test {
     #[should_panic(expected = "No message")]
     fn receive_no_message() {
         let channel = OneShotChannel::<i32>::new();
-        unsafe { channel.receive() };
+        channel.receive();
+    }
+
+    #[test]
+    #[should_panic]
+    fn multiple_receives() {
+        let channel = OneShotChannel::new();
+        unsafe {
+            channel.send(123);
+        }
+        channel.receive();
+        channel.receive();
     }
 }
