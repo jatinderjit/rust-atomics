@@ -73,7 +73,7 @@ pub mod check {
 
     pub fn run() {
         let once_data = OnceData::new(get_data);
-        eprintln!("start: {}", get_data().value);
+        println!("start: {}", get_data().value);
         std::thread::scope(|s| {
             for _ in 0..100 {
                 s.spawn(|| {

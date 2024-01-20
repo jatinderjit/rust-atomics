@@ -64,11 +64,6 @@ pub mod check {
     use std::{thread, time::Duration};
 
     pub fn run() {
-        run1();
-        run2();
-    }
-
-    fn run1() {
         let lock = SpinLock::new(-1);
         thread::scope(|s| {
             for i in 0..2 {
@@ -88,14 +83,23 @@ pub mod check {
             }
         });
     }
+}
 
-    fn run2() {
+#[cfg(test)]
+mod test {
+    use super::SpinLock;
+    use std::{thread, time::Duration};
+
+    /// This is probably not going to be conclusive!
+    #[test]
+    fn add() {
         let lock = SpinLock::new(0 as usize);
-        const THREADS: usize = 1000;
+        const THREADS: usize = 100;
         thread::scope(|s| {
             for _ in 0..THREADS {
                 s.spawn(|| {
                     let mut guard = lock.lock();
+                    thread::sleep(Duration::from_millis(1));
                     *guard += 1;
                 });
             }
