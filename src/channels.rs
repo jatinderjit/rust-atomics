@@ -59,10 +59,27 @@ impl<T> OneShotChannel<T> {
     }
 }
 
+impl<T> Drop for OneShotChannel<T> {
+    fn drop(&mut self) {
+        // Atomic access is unnecessary.
+        let state = *self.state.get_mut();
+
+        // MaybeUninit should not be drop if it is not initialized.
+        // If it has been received, then the value has been moved, and should not be
+        // dropped by us.
+        if state == EMPTY || state == DONE {
+            return;
+        }
+        // UnsafeCell::get_mut is a compile time guarantee that this is the only
+        // reference.
+        unsafe { self.message.get_mut().assume_init_drop() }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::OneShotChannel;
-    use std::{thread, time::Duration};
+    use std::{rc::Rc, thread, time::Duration};
 
     #[test]
     fn single_thread() {
@@ -116,5 +133,32 @@ mod test {
         let channel = OneShotChannel::new();
         channel.send(123);
         channel.send(123);
+    }
+
+    #[test]
+    fn drop_no_receive() {
+        let value = Rc::new(123);
+        let channel = OneShotChannel::new();
+
+        channel.send(Rc::clone(&value));
+        assert_eq!(Rc::strong_count(&value), 2);
+
+        drop(channel);
+        assert_eq!(Rc::strong_count(&value), 1);
+    }
+
+    #[test]
+    fn drop_with_receive() {
+        let value = Rc::new(123);
+        let channel = OneShotChannel::new();
+
+        channel.send(Rc::clone(&value));
+        assert_eq!(Rc::strong_count(&value), 2);
+
+        channel.receive();
+        assert_eq!(Rc::strong_count(&value), 1);
+
+        drop(channel);
+        assert_eq!(Rc::strong_count(&value), 1);
     }
 }

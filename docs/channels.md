@@ -216,3 +216,8 @@ pub struct OneShotChannel<T> {
 ```
 
 And use `compare_exchange` instead of `swap`.
+
+### Version 6: Fix memory leak
+
+`MaybeUninit` will leak the memory, if a never `receive`d. Implement `Drop` if
+message has been sent, but not received.
