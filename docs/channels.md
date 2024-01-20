@@ -124,8 +124,7 @@ We will panic if no message is available.
 ```rs
     /// Panics if no message is available.
     ///
-    /// Safety: Call this only once,
-    ///  after verifying that the message is `is_ready`.
+    /// Call this only once, after verifying that the message is `is_ready`.
     pub unsafe fn receive(&self) -> T {
         if !self.ready.load(Ordering::Acquire) {
             panic!("No message");
@@ -166,3 +165,33 @@ behavior now.
         unsafe { (*self.message.get()).assume_init_read() }
     }
 ```
+
+### Version 4: Fix multiple sends
+
+We'll need an extra `AtomicBool` field to check if there are parallel calls.
+
+```rs
+pub struct OneShotChannel<T> {
+    message: UnsafeCell<MaybeUninit<T>>,
+    in_use: AtomicBool,  // new field
+    ready: AtomicBool,
+}
+```
+
+If a message has already been sent, we'll panic. Now `send` also doesn't need to
+be `unsafe`.
+
+```rs
+    /// Safety: Call this only once!
+    pub fn send(&self, message: T) {
+        if self.in_use.swap(true, Ordering::Relaxed) {
+            panic!("Can't send more than one message!")
+        }
+        unsafe {
+            (*self.message.get()).write(message);
+        }
+        self.ready.store(true, Ordering::Release);
+    }
+```
+
+Relaxed memory ordering will suffice because of the _total modification order_.

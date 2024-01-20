@@ -7,6 +7,7 @@ use std::{
 
 pub struct OneShotChannel<T> {
     message: UnsafeCell<MaybeUninit<T>>,
+    in_use: AtomicBool,
     ready: AtomicBool,
 }
 
@@ -16,13 +17,19 @@ impl<T> OneShotChannel<T> {
     pub fn new() -> Self {
         OneShotChannel {
             message: UnsafeCell::new(MaybeUninit::uninit()),
+            in_use: AtomicBool::new(false),
             ready: AtomicBool::new(false),
         }
     }
 
-    /// Safety: Call this only once!
-    pub unsafe fn send(&self, message: T) {
-        (*self.message.get()).write(message);
+    /// Panics
+    pub fn send(&self, message: T) {
+        if self.in_use.swap(true, Ordering::Relaxed) {
+            panic!("Can't send more than one message!")
+        }
+        unsafe {
+            (*self.message.get()).write(message);
+        }
         self.ready.store(true, Ordering::Release);
     }
 
@@ -32,8 +39,7 @@ impl<T> OneShotChannel<T> {
 
     /// Panics if no message is available.
     ///
-    /// Safety: Call this only once,
-    ///  after verifying that the message is `is_ready`.
+    /// Call this only once, after verifying that the message is `is_ready`.
     pub fn receive(&self) -> T {
         if !self.ready.swap(false, Ordering::Acquire) {
             panic!("No message");
@@ -52,10 +58,9 @@ mod test {
         let channel = OneShotChannel::new();
         assert!(!channel.is_ready());
 
-        unsafe {
-            channel.send(123);
-        }
+        channel.send(123);
         assert!(channel.is_ready());
+
         let val = channel.receive();
         assert_eq!(val, 123);
     }
@@ -75,9 +80,7 @@ mod test {
             });
             s.spawn(move || {
                 thread::sleep(Duration::from_millis(100));
-                unsafe {
-                    channel.send(123);
-                }
+                channel.send(123);
                 receiver.thread().unpark();
             });
         })
@@ -94,10 +97,16 @@ mod test {
     #[should_panic]
     fn multiple_receives() {
         let channel = OneShotChannel::new();
-        unsafe {
-            channel.send(123);
-        }
+        channel.send(123);
         channel.receive();
         channel.receive();
+    }
+
+    #[test]
+    #[should_panic]
+    fn multiple_sends() {
+        let channel = OneShotChannel::new();
+        channel.send(123);
+        channel.send(123);
     }
 }
