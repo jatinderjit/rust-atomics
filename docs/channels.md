@@ -103,7 +103,9 @@ impl<T> OneShotChannel<T> {
 }
 ```
 
-Problems (apart from the obvious unsafe interface):
+#### Problems
+
+(apart from the obvious unsafe interface)
 
 1. Calling `recieve` before the message `is_ready` can cause undefined behavior.
 2. `send` can be called twice. This can cause data races, when the second `send`
@@ -182,7 +184,7 @@ If a message has already been sent, we'll panic. Now `send` also doesn't need to
 be `unsafe`.
 
 ```rs
-    /// Safety: Call this only once!
+    /// Panics if called more than once!
     pub fn send(&self, message: T) {
         if self.in_use.swap(true, Ordering::Relaxed) {
             panic!("Can't send more than one message!")
@@ -195,3 +197,22 @@ be `unsafe`.
 ```
 
 Relaxed memory ordering will suffice because of the _total modification order_.
+
+### Version 5: Optimize memory usage
+
+Instead of two `AtomicBool`s, we can do with only one `AtomicU8` to manage the
+states.
+
+```rs
+const EMPTY: u8 = 0;
+const WRITING: u8 = 1;
+const READY: u8 = 2;
+const DONE: u8 = 3;
+
+pub struct OneShotChannel<T> {
+    message: UnsafeCell<MaybeUninit<T>>,
+    state: AtomicU8,
+}
+```
+
+And use `compare_exchange` instead of `swap`.
