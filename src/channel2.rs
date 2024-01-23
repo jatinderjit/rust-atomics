@@ -1,8 +1,9 @@
-use core::panic;
 use std::{
     cell::UnsafeCell,
+    marker::PhantomData,
     mem::MaybeUninit,
     sync::atomic::{AtomicBool, Ordering::*},
+    thread::{self, Thread},
 };
 
 pub struct OneShotChannel<T> {
@@ -22,7 +23,15 @@ impl<T> OneShotChannel<T> {
         // Reset, in case this is called again, once the sender and receiver
         // have "expired". This will also drop the existing channel.
         *self = Self::new();
-        (Sender { channel: self }, Receiver { channel: self })
+        let sender = Sender {
+            channel: self,
+            receiving_thread: thread::current(),
+        };
+        let receiver = Receiver {
+            channel: self,
+            _no_send: PhantomData,
+        };
+        (sender, receiver)
     }
 }
 
@@ -38,16 +47,19 @@ impl<T> Drop for OneShotChannel<T> {
 
 pub struct Sender<'a, T> {
     channel: &'a OneShotChannel<T>,
+    receiving_thread: Thread,
 }
 
 pub struct Receiver<'a, T> {
     channel: &'a OneShotChannel<T>,
+    _no_send: PhantomData<*const ()>,
 }
 
 impl<T> Sender<'_, T> {
     pub fn send(self, message: T) {
         unsafe { (*self.channel.message.get()).write(message) };
         self.channel.ready.store(true, Release);
+        self.receiving_thread.unpark();
     }
 }
 
@@ -57,8 +69,8 @@ impl<T> Receiver<'_, T> {
     }
 
     pub fn receive(self) -> T {
-        if !self.channel.ready.swap(false, Acquire) {
-            panic!("No message!")
+        while !self.channel.ready.swap(false, Acquire) {
+            thread::park();
         }
         unsafe { (*self.channel.message.get()).assume_init_read() }
     }
@@ -85,28 +97,13 @@ mod test {
         let mut channel = OneShotChannel::new();
         let (sender, receiver) = channel.split();
         thread::scope(|s| {
-            let recv_thread = s.spawn(|| {
-                // Not really a guarantee!
-                assert!(!receiver.is_ready());
-                while !receiver.is_ready() {
-                    thread::park();
-                }
-                assert_eq!(receiver.receive(), 123);
-            });
-            s.spawn(move || {
+            s.spawn(|| {
                 thread::sleep(Duration::from_millis(10));
                 sender.send(123);
-                recv_thread.thread().unpark();
             });
+            assert!(!receiver.is_ready());
+            assert_eq!(receiver.receive(), 123);
         });
-    }
-
-    #[test]
-    #[should_panic]
-    fn receive_before_send() {
-        let mut channel = OneShotChannel::<i32>::new();
-        let (_, receiver) = channel.split();
-        receiver.receive();
     }
 
     #[test]

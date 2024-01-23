@@ -326,3 +326,10 @@ pub struct Receiver<'a, T> {
 until any one of `Sender` and `Receiver` is in scope. When both are dropped,
 `split` can be called again to produce a new pair. The channel is also reset for
 this new pair, so that the old message might not creep in.
+
+### Version 9: Blocking Receive
+
+Get rid of the panic! The `Receiver` will park the thread, if no message is
+available. The `Sender` now needs a reference to the `Receiver`'s thread. We'll
+choose an easy way out, and restrict the `Receiver` by not allowing to to be
+`Send` anymore. So the thread calling `split` will be the receiving thread.
