@@ -1,30 +1,36 @@
 use std::{
     ops::Deref,
-    sync::atomic::{AtomicU32, Ordering::Relaxed},
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering::Relaxed},
 };
 
-struct Inner<T> {
+struct Inner<T: ?Sized> {
+    count: AtomicUsize,
     value: T,
-    count: AtomicU32,
 }
 
-pub struct Arc<T> {
-    inner: *const Inner<T>,
+pub struct Arc<T: ?Sized> {
+    inner: NonNull<Inner<T>>,
 }
 
 impl<T> Arc<T> {
     pub fn new(value: T) -> Self {
         let inner = Inner {
             value,
-            count: AtomicU32::new(1),
+            count: AtomicUsize::new(1),
         };
+        let inner = Box::into_raw(Box::new(inner));
         Self {
-            inner: Box::into_raw(Box::new(inner)),
+            inner: unsafe { NonNull::new_unchecked(inner) },
         }
     }
 
-    pub fn strong_count(&self) -> u32 {
-        unsafe { &*self.inner }.count.load(Relaxed)
+    fn inner(&self) -> &Inner<T> {
+        unsafe { &self.inner.as_ref() }
+    }
+
+    pub fn strong_count(&self) -> usize {
+        self.inner().count.load(Relaxed)
     }
 }
 
@@ -34,22 +40,22 @@ unsafe impl<T> Sync for Arc<T> where T: Sync {}
 impl<T> Deref for Arc<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        &(unsafe { &*self.inner }).value
+        &self.inner().value
     }
 }
 
 impl<T> Clone for Arc<T> {
     fn clone(&self) -> Self {
-        unsafe { &*self.inner }.count.fetch_add(1, Relaxed);
+        self.inner().count.fetch_add(1, Relaxed);
         Self { inner: self.inner }
     }
 }
 
-impl<T> Drop for Arc<T> {
+impl<T: ?Sized> Drop for Arc<T> {
     fn drop(&mut self) {
-        let prev_count = unsafe { &*self.inner }.count.fetch_sub(1, Relaxed);
+        let prev_count = unsafe { self.inner.as_mut() }.count.fetch_sub(1, Relaxed);
         if prev_count == 1 {
-            unsafe { drop(Box::from_raw(self.inner.cast_mut())) };
+            unsafe { drop(Box::from_raw(self.inner.as_mut())) };
         }
     }
 }
