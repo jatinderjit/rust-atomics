@@ -97,6 +97,7 @@ mod test {
         thread::scope(|s| {
             let channel = &channel;
             let receiver = s.spawn(|| {
+                // Not really a guarantee!
                 assert!(!channel.is_ready());
                 while !channel.is_ready() {
                     thread::park();
@@ -104,7 +105,7 @@ mod test {
                 assert_eq!(channel.receive(), 123);
             });
             s.spawn(move || {
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(10));
                 channel.send(123);
                 receiver.thread().unpark();
             });
@@ -113,7 +114,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "No message!")]
-    fn receive_no_message() {
+    fn receive_before_send() {
         let channel = OneShotChannel::<i32>::new();
         channel.receive();
     }
@@ -136,7 +137,7 @@ mod test {
     }
 
     #[test]
-    fn drop_no_receive() {
+    fn drop_without_receive() {
         let value = Rc::new(123);
         let channel = OneShotChannel::new();
 
@@ -148,7 +149,7 @@ mod test {
     }
 
     #[test]
-    fn drop_with_receive() {
+    fn drop_after_receive() {
         let value = Rc::new(123);
         let channel = OneShotChannel::new();
 

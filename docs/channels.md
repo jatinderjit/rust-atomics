@@ -1,5 +1,10 @@
 # Channels
 
+Implementations:
+
+- [Runtime safety](../src/channel1.rs) (with panics!)
+- [Compile time safety](../src/channel2.rs)
+
 ## Generic Channel
 
 Simply use a `Mutex` and a `Condvar` with send and receive. Use `VecDeque` to
@@ -221,3 +226,65 @@ And use `compare_exchange` instead of `swap`.
 
 `MaybeUninit` will leak the memory, if a never `receive`d. Implement `Drop` if
 message has been sent, but not received.
+
+### Version 7: Safety Through Types
+
+We've protected undefined behavior, but at the risk of a panic if the methods
+are used incorrectly. Ideally, the compiler should detect and point out the
+misuse.
+
+To prevent a function from being called more than once, it can take the argument
+`by value`, which will consume the object for non-`Copy` types.
+
+We will need separate non-`Copy` types to `send` and `receive` to make sure each
+can only happen once. The new `Sender` and `Receiver` structs will need a
+reference to the common channel (which doesn't need to be public anymore). Let's
+use `Arc` for that.
+
+```rs
+pub struct Sender<T> {
+    channel: Arc<OneShotChannel<T>>,
+}
+
+pub struct Receiver<T> {
+    channel: Arc<OneShotChannel<T>>,
+}
+
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+    let channel = OneShotChannel {
+        message: UnsafeCell::new(MaybeUninit::uninit()),
+        ready: AtomicBool::new(false),
+    };
+    let channel = Arc::new(channel);
+    (
+        Sender { channel: Arc::clone(&channel) },
+        Receiver { channel },
+    )
+}
+
+impl<T> Sender<T> {
+    pub fn send(self, message: T) {
+        unsafe { (*self.channel.message.get()).write(message) };
+        self.channel.ready.store(true, Release);
+    }
+}
+
+impl<T> Receiver<T> {
+    pub fn is_ready(&self) -> bool {
+        self.channel.ready.load(Relaxed)
+    }
+
+    pub fn receive(self) -> T {
+        if !self.channel.ready.swap(false, Acquire) {
+            panic!("No message!")
+        }
+        unsafe { (*self.channel.message.get()).assume_init_read() }
+    }
+}
+```
+
+- Only one message can be sent.
+- Only one message can be received.
+- But the onus on when to call `receive` is still on the user and the method can
+  still panic.
+- Due to the channel being wrapped in an `Arc`, there's now an allocation.
