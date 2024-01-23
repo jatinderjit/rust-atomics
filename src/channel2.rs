@@ -2,15 +2,28 @@ use core::panic;
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    sync::{
-        atomic::{AtomicBool, Ordering::*},
-        Arc,
-    },
+    sync::atomic::{AtomicBool, Ordering::*},
 };
 
-struct OneShotChannel<T> {
+pub struct OneShotChannel<T> {
     message: UnsafeCell<MaybeUninit<T>>,
     ready: AtomicBool,
+}
+
+impl<T> OneShotChannel<T> {
+    pub fn new() -> Self {
+        Self {
+            message: UnsafeCell::new(MaybeUninit::uninit()),
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    pub fn split<'a>(&'a mut self) -> (Sender<'a, T>, Receiver<'a, T>) {
+        // Reset, in case this is called again, once the sender and receiver
+        // have "expired". This will also drop the existing channel.
+        *self = Self::new();
+        (Sender { channel: self }, Receiver { channel: self })
+    }
 }
 
 unsafe impl<T> Sync for OneShotChannel<T> where T: Send {}
@@ -23,36 +36,22 @@ impl<T> Drop for OneShotChannel<T> {
     }
 }
 
-pub struct Sender<T> {
-    channel: Arc<OneShotChannel<T>>,
+pub struct Sender<'a, T> {
+    channel: &'a OneShotChannel<T>,
 }
 
-pub struct Receiver<T> {
-    channel: Arc<OneShotChannel<T>>,
+pub struct Receiver<'a, T> {
+    channel: &'a OneShotChannel<T>,
 }
 
-pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let channel = OneShotChannel {
-        message: UnsafeCell::new(MaybeUninit::uninit()),
-        ready: AtomicBool::new(false),
-    };
-    let channel = Arc::new(channel);
-    (
-        Sender {
-            channel: Arc::clone(&channel),
-        },
-        Receiver { channel },
-    )
-}
-
-impl<T> Sender<T> {
+impl<T> Sender<'_, T> {
     pub fn send(self, message: T) {
         unsafe { (*self.channel.message.get()).write(message) };
         self.channel.ready.store(true, Release);
     }
 }
 
-impl<T> Receiver<T> {
+impl<T> Receiver<'_, T> {
     pub fn is_ready(&self) -> bool {
         self.channel.ready.load(Relaxed)
     }
@@ -69,11 +68,12 @@ impl<T> Receiver<T> {
 mod test {
     use std::{rc::Rc, thread, time::Duration};
 
-    use super::channel;
+    use super::OneShotChannel;
 
     #[test]
     fn single_thread() {
-        let (sender, receiver) = channel();
+        let mut channel = OneShotChannel::new();
+        let (sender, receiver) = channel.split();
         assert!(!receiver.is_ready());
         sender.send(123);
         assert!(receiver.is_ready());
@@ -82,7 +82,8 @@ mod test {
 
     #[test]
     fn multiple_threads() {
-        let (sender, receiver) = channel();
+        let mut channel = OneShotChannel::new();
+        let (sender, receiver) = channel.split();
         thread::scope(|s| {
             let recv_thread = s.spawn(|| {
                 // Not really a guarantee!
@@ -103,18 +104,20 @@ mod test {
     #[test]
     #[should_panic]
     fn receive_before_send() {
-        let (_, receiver) = channel::<i32>();
+        let mut channel = OneShotChannel::<i32>::new();
+        let (_, receiver) = channel.split();
         receiver.receive();
     }
 
     #[test]
     fn drop_without_receive() {
         let message = Rc::new(123);
-        let (sender, receiver) = channel();
+        let mut channel = OneShotChannel::new();
+        let (sender, _) = channel.split();
         sender.send(Rc::clone(&message));
         assert_eq!(Rc::strong_count(&message), 2);
 
-        drop(receiver);
+        drop(channel);
 
         assert_eq!(Rc::strong_count(&message), 1);
     }
@@ -122,13 +125,39 @@ mod test {
     #[test]
     fn drop_after_receive() {
         let message = Rc::new(123);
-        let (sender, receiver) = channel();
+        let mut channel = OneShotChannel::new();
+        let (sender, receiver) = channel.split();
         sender.send(Rc::clone(&message));
         assert_eq!(Rc::strong_count(&message), 2);
 
         let received = receiver.receive();
         assert_eq!(&message, &received);
         assert_eq!(*received, 123);
+        assert_eq!(Rc::strong_count(&message), 2);
+
+        drop(received);
+        assert_eq!(Rc::strong_count(&message), 1);
+    }
+
+    #[test]
+    fn channel_reuse() {
+        let message = Rc::new(123);
+        let mut channel = OneShotChannel::new();
+        let (sender, _) = channel.split();
+        sender.send(Rc::clone(&message));
+        assert_eq!(Rc::strong_count(&message), 2);
+
+        // sender and receiver should be dropped now
+        let (sender, receiver) = channel.split();
+        assert_eq!(Rc::strong_count(&message), 1);
+
+        sender.send(Rc::clone(&message));
+        assert_eq!(Rc::strong_count(&message), 2);
+
+        let received = receiver.receive();
+        assert_eq!(Rc::strong_count(&message), 2);
+
+        drop(channel);
         assert_eq!(Rc::strong_count(&message), 2);
 
         drop(received);

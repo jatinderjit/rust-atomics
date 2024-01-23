@@ -288,3 +288,41 @@ impl<T> Receiver<T> {
 - But the onus on when to call `receive` is still on the user and the method can
   still panic.
 - Due to the channel being wrapped in an `Arc`, there's now an allocation.
+
+### Version 8: Avoid Allocation
+
+This will require a trade-off wrt usage. We'll need to keep a reference to the
+channel, while the `Sender` and `Receiver` are in scope. Or opposite: the
+lifetimes of `Sender` and `Receiver` will be tied to the `Channel`. Also the
+`Channel` is now `pub` again!
+
+```rs
+impl<T> OneShotChannel<T> {
+    pub fn new() -> Self {
+        Self {
+            message: UnsafeCell::new(MaybeUninit::uninit()),
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    pub fn split<'a>(&'a mut self) -> (Sender<'a, T>, Receiver<'a, T>) {
+        // Reset, in case this is called again, once the sender and receiver
+        // have "expired". This will also drop the existing channel.
+        *self = Self::new();
+        (Sender { channel: self }, Receiver { channel: self })
+    }
+}
+
+pub struct Sender<'a, T> {
+    channel: &'a OneShotChannel<T>,
+}
+
+pub struct Receiver<'a, T> {
+    channel: &'a OneShotChannel<T>,
+}
+```
+
+`split` takes `&mut self`, which implies that the exclusive access is applicable
+until any one of `Sender` and `Receiver` is in scope. When both are dropped,
+`split` can be called again to produce a new pair. The channel is also reset for
+this new pair, so that the old message might not creep in.
