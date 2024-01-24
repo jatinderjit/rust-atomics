@@ -9,6 +9,9 @@ struct Inner<T: ?Sized> {
     value: T,
 }
 
+/// Arc (Atomically Reference Counted) is a thread-safe version of `Rc`.
+///
+/// `Arc<T>` provides a shared ownership of `T`, allocating it on heap.
 pub struct Arc<T: ?Sized> {
     inner: NonNull<Inner<T>>,
 }
@@ -34,8 +37,13 @@ impl<T> Arc<T> {
     }
 }
 
-unsafe impl<T> Send for Arc<T> {}
-unsafe impl<T> Sync for Arc<T> where T: Sync {}
+/// `Arc<T>` can be passed between threads, if `T` can be. Since `Arc<T>` also
+/// provides a shared reference, sending it across threads might result in
+/// shared references which are not synchronized by default. So `Send` should
+/// also implement `Sync` for safe reference from multiple threads.
+unsafe impl<T: Send + Sync> Send for Arc<T> {}
+
+unsafe impl<T: Send + Sync> Sync for Arc<T> {}
 
 impl<T> Deref for Arc<T> {
     type Target = T;
