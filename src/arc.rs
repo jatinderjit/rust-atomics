@@ -1,40 +1,45 @@
 use std::{
+    cell::UnsafeCell,
     ops::Deref,
     ptr::NonNull,
     sync::atomic::{fence, AtomicUsize, Ordering::*},
 };
 
-struct Inner<T: ?Sized> {
+struct Inner<T> {
     /// Total number of `Arc` instances.
-    count: AtomicUsize,
-    data: T,
+    data_ref_count: AtomicUsize,
+    /// Total number of `Arc` and `Weak` instances.
+    alloc_ref_count: AtomicUsize,
+    /// Data will be dropped if only weak pointers are left.
+    data: UnsafeCell<Option<T>>,
 }
 
 /// Arc (Atomically Reference Counted) is a thread-safe version of `Rc`.
 ///
 /// `Arc<T>` provides a shared ownership of `T`, allocating it on heap.
-pub struct Arc<T: ?Sized> {
-    inner: NonNull<Inner<T>>,
+pub struct Arc<T> {
+    weak: Weak<T>,
 }
 
 impl<T> Arc<T> {
     pub fn new(data: T) -> Self {
-        let inner = Inner {
-            data,
-            count: AtomicUsize::new(1),
+        let inner = Box::leak(Box::new(Inner {
+            data_ref_count: AtomicUsize::new(1),
+            alloc_ref_count: AtomicUsize::new(1),
+            data: UnsafeCell::new(Some(data)),
+        }));
+        let weak = Weak {
+            inner: NonNull::from(inner),
         };
-        let inner = Box::into_raw(Box::new(inner));
-        Self {
-            inner: unsafe { NonNull::new_unchecked(inner) },
-        }
+        Self { weak }
     }
 
     fn inner(&self) -> &Inner<T> {
-        unsafe { &self.inner.as_ref() }
+        self.weak.inner()
     }
 
     pub fn strong_count(&self) -> usize {
-        self.inner().count.load(Relaxed)
+        self.inner().data_ref_count.load(Relaxed)
     }
 
     /// Get a mutable reference to the underlying data, only if this is the only
@@ -44,42 +49,46 @@ impl<T> Arc<T> {
     // implement `Deref`, to avoid ambiguity with a similarly named method on
     // the underlying `T`.
     pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
-        if arc.inner().count.load(Relaxed) == 1 {
+        if arc.inner().alloc_ref_count.load(Relaxed) == 1 {
             fence(Acquire);
-            unsafe { Some(&mut arc.inner.as_mut().data) }
+            // Safety: there's only one Arc, to which we have an exclusive
+            // access.
+            let inner = unsafe { arc.weak.inner.as_mut() };
+            let option = inner.data.get_mut();
+            let data = option.as_mut().unwrap();
+            Some(data)
         } else {
             None
         }
     }
 }
 
-/// `Arc<T>` can be passed between threads, if `T` can be. Since `Arc<T>` also
-/// provides a shared reference, sending it across threads might result in
-/// shared references which are not synchronized by default. So `Send` should
-/// also implement `Sync` for safe reference from multiple threads.
-unsafe impl<T: Send + Sync> Send for Arc<T> {}
-
-unsafe impl<T: Send + Sync> Sync for Arc<T> {}
-
 impl<T> Deref for Arc<T> {
     type Target = T;
+
     fn deref(&self) -> &Self::Target {
-        &self.inner().data
+        let data = self.inner().data.get();
+        // Safety: Since this Arc exists, the data exists.
+        unsafe { (*data).as_ref().unwrap() }
     }
 }
 
 impl<T> Clone for Arc<T> {
     fn clone(&self) -> Self {
-        self.inner().count.fetch_add(1, Relaxed);
-        Self { inner: self.inner }
+        if self.inner().data_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+            // too many references
+            std::process::abort();
+        }
+        let weak = self.weak.clone();
+        Self { weak }
     }
 }
 
-impl<T: ?Sized> Drop for Arc<T> {
+impl<T> Drop for Arc<T> {
     fn drop(&mut self) {
         // This needs to be synchronized only when the Inner struct is getting
         // dropped.
-        let prev_count = unsafe { self.inner.as_mut() }.count.fetch_sub(1, Release);
+        let prev_count = self.inner().data_ref_count.fetch_sub(1, Release);
         if prev_count == 1 {
             // From the official `std::sync::Arc` docs:
             //
@@ -98,7 +107,47 @@ impl<T: ?Sized> Drop for Arc<T> {
             //
             // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
             fence(Acquire);
-            unsafe { drop(Box::from_raw(self.inner.as_mut())) };
+
+            let data = self.inner().data.get();
+            // Safety: The data reference count is zero. So there isn't any
+            // remaining Arc to access this.
+            unsafe { *data = None };
+        }
+    }
+}
+
+pub struct Weak<T> {
+    inner: NonNull<Inner<T>>,
+}
+
+/// `Arc<T>` can be passed between threads, if `T` can be. Since `Arc<T>` also
+/// provides a shared reference, sending it across threads might result in
+/// shared references which are not synchronized by default. So `Send` should
+/// also implement `Sync` for safe reference from multiple threads.
+unsafe impl<T: Send + Sync> Send for Weak<T> {}
+unsafe impl<T: Send + Sync> Sync for Weak<T> {}
+
+impl<T> Weak<T> {
+    fn inner(&self) -> &Inner<T> {
+        unsafe { self.inner.as_ref() }
+    }
+}
+
+impl<T> Clone for Weak<T> {
+    fn clone(&self) -> Self {
+        if self.inner().alloc_ref_count.fetch_add(1, Relaxed) > usize::MAX / 2 {
+            // Too many references!
+            std::process::abort();
+        };
+        Self { inner: self.inner }
+    }
+}
+
+impl<T> Drop for Weak<T> {
+    fn drop(&mut self) {
+        if self.inner().alloc_ref_count.fetch_sub(1, Relaxed) == 1 {
+            fence(Acquire);
+            unsafe { drop(Box::from_raw(self.inner.as_ptr())) };
         }
     }
 }
