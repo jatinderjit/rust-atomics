@@ -61,6 +61,10 @@ impl<T> Arc<T> {
             None
         }
     }
+
+    pub fn downgrade(arc: &Self) -> Weak<T> {
+        arc.weak.clone()
+    }
 }
 
 impl<T> Deref for Arc<T> {
@@ -131,6 +135,25 @@ impl<T> Weak<T> {
     fn inner(&self) -> &Inner<T> {
         unsafe { self.inner.as_ref() }
     }
+
+    pub fn upgrade(&self) -> Option<Arc<T>> {
+        let mut count = self.inner().data_ref_count.load(Relaxed);
+        loop {
+            if count == 0 {
+                return None;
+            }
+            assert!(count <= usize::MAX / 2);
+            if let Err(e) =
+                self.inner()
+                    .data_ref_count
+                    .compare_exchange(count, count + 1, Relaxed, Relaxed)
+            {
+                count = e;
+                continue;
+            }
+            return Some(Arc { weak: self.clone() });
+        }
+    }
 }
 
 impl<T> Clone for Weak<T> {
@@ -154,9 +177,12 @@ impl<T> Drop for Weak<T> {
 
 #[cfg(test)]
 mod test {
-    use std::{sync::Mutex, thread};
+    use std::{
+        sync::{atomic::Ordering::*, Mutex},
+        thread,
+    };
 
-    use super::Arc;
+    use super::{Arc, Weak};
 
     #[test]
     fn single_thread() {
@@ -205,5 +231,35 @@ mod test {
         assert!(Arc::get_mut(&mut arc).is_none());
         drop(arc2);
         assert!(Arc::get_mut(&mut arc).is_some());
+    }
+
+    #[test]
+    fn downgrade() {
+        let arc = Arc::new(1);
+        let weak = Arc::downgrade(&arc);
+        assert_eq!(weak.inner().data_ref_count.load(Relaxed), 1);
+        assert_eq!(weak.inner().alloc_ref_count.load(Relaxed), 2);
+
+        drop(weak);
+        assert_eq!(arc.inner().alloc_ref_count.load(Relaxed), 1);
+    }
+
+    #[test]
+    fn upgrade_fail() {
+        let arc = Arc::new(1);
+        let weak = Arc::downgrade(&arc);
+
+        drop(arc);
+        assert!(Weak::upgrade(&weak).is_none());
+    }
+
+    #[test]
+    fn upgrade_success() {
+        let arc = Arc::new(1);
+        let _arc2 = Arc::clone(&arc);
+        let weak = Arc::downgrade(&arc);
+        drop(arc);
+
+        assert!(Weak::upgrade(&weak).is_some());
     }
 }
