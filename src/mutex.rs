@@ -7,11 +7,13 @@ use std::{
 use atomic_wait::{wait, wake_one};
 
 const UNLOCKED: u32 = 0;
-const LOCKED: u32 = 1;
+const LOCKED_UNCONTENDED: u32 = 1;
+const LOCKED_CONTENDED: u32 = 2;
 
 pub struct Mutex<T> {
     /// 0: unlocked
-    /// 1: locked
+    /// 1: locked, with no contention
+    /// 2: locked, with other threads waiting
     state: AtomicU32,
     data: UnsafeCell<T>,
 }
@@ -27,22 +29,36 @@ impl<T> Mutex<T> {
     }
 
     pub fn lock(&self) -> MutexGuard<T> {
-        // While previous state was not UNLOCKED
-        while self.state.swap(LOCKED, Relaxed) != UNLOCKED {
-            wait(&self.state, LOCKED);
+        // Succeeds if
+        // - either this is the only thread trying to lock. We may be able to
+        //   avoid the `wake` syscall in this case, if no other thread tries to
+        //   acquire the lock, before this thread unlocks.
+        // - this is the winner among all the threads trying to lock. The other
+        //   threads will mark the lock as contended, and this thread will know
+        //   that it has to `wake` another thread.
+        if self.state.swap(LOCKED_UNCONTENDED, Acquire) != UNLOCKED {
+            // Wait while the locking thread releases the lock.
+            //
+            // Also mark the lock as "contended" so that the locking thread
+            // knows it has to wake this.
+            while self.state.swap(LOCKED_CONTENDED, Relaxed) != UNLOCKED {
+                wait(&self.state, LOCKED_CONTENDED);
+            }
+            fence(Acquire);
         }
-        fence(Acquire);
         MutexGuard { mutex: self }
     }
 
     #[cfg(test)]
     fn is_locked(&self) -> bool {
-        self.state.load(Relaxed) == LOCKED
+        self.state.load(Relaxed) != UNLOCKED
     }
 
     fn unlock(&self) {
-        self.state.store(UNLOCKED, Release);
-        wake_one(&self.state);
+        // We can avoid the syscall if there's no thread waiting.
+        if self.state.swap(UNLOCKED, Release) == LOCKED_CONTENDED {
+            wake_one(&self.state);
+        }
     }
 }
 
