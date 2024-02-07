@@ -19,7 +19,7 @@ pub struct Mutex<T> {
 unsafe impl<T> Sync for Mutex<T> where T: Send {}
 
 impl<T> Mutex<T> {
-    pub fn new(data: T) -> Self {
+    pub const fn new(data: T) -> Self {
         Self {
             state: AtomicU32::new(0),
             data: UnsafeCell::new(data),
