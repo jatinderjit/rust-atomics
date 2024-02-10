@@ -2,6 +2,7 @@ use std::{
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
     sync::atomic::{fence, AtomicU32, Ordering::*},
+    usize,
 };
 
 use atomic_wait::{wait, wake_one};
@@ -9,6 +10,8 @@ use atomic_wait::{wait, wake_one};
 const UNLOCKED: u32 = 0;
 const LOCKED_UNCONTENDED: u32 = 1;
 const LOCKED_CONTENDED: u32 = 2;
+
+const MAX_SPINS: usize = 100;
 
 pub struct Mutex<T> {
     /// 0: unlocked
@@ -37,16 +40,36 @@ impl<T> Mutex<T> {
         //   threads will mark the lock as contended, and this thread will know
         //   that it has to `wake` another thread.
         if self.state.swap(LOCKED_UNCONTENDED, Acquire) != UNLOCKED {
-            // Wait while the locking thread releases the lock.
-            //
-            // Also mark the lock as "contended" so that the locking thread
-            // knows it has to wake this.
-            while self.state.swap(LOCKED_CONTENDED, Relaxed) != UNLOCKED {
-                wait(&self.state, LOCKED_CONTENDED);
-            }
-            fence(Acquire);
+            self.lock_contended();
         }
         MutexGuard { mutex: self }
+    }
+
+    // The `cold` attribute suggests that the function is unlikely to be called.
+    #[cold]
+    fn lock_contended(&self) {
+        let mut spins = 0;
+        // Spin only if this is the only thread waiting on it. (Else all the
+        // waiting threads will be spinning!)
+        while spins < MAX_SPINS && self.state.load(Relaxed) == LOCKED_UNCONTENDED {
+            spins += 1;
+            std::hint::spin_loop();
+        }
+        if self
+            .state
+            .compare_exchange(UNLOCKED, LOCKED_UNCONTENDED, Acquire, Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+        // Wait while the locking thread releases the lock.
+        //
+        // Also mark the lock as "contended" so that the locking thread
+        // knows it has to wake this.
+        while self.state.swap(LOCKED_CONTENDED, Relaxed) != UNLOCKED {
+            wait(&self.state, LOCKED_CONTENDED);
+        }
+        fence(Acquire);
     }
 
     #[cfg(test)]
