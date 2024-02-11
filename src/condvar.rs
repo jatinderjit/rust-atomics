@@ -18,8 +18,7 @@ impl Condvar {
         }
     }
 
-    // Mutex has to live at least as long as the Condvar
-    pub fn wait<'a, 'b: 'a, T>(&'a self, guard: MutexGuard<'b, T>) -> MutexGuard<T> {
+    pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
         let mutex = guard.mutex;
         drop(guard);
         while self.state.swap(NOT_READY, Relaxed) != READY {
