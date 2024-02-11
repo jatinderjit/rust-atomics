@@ -90,7 +90,7 @@ impl<T> Mutex<T> {
 }
 
 pub struct MutexGuard<'a, T> {
-    mutex: &'a Mutex<T>,
+    pub(super) mutex: &'a Mutex<T>,
 }
 
 impl<'a, T> Deref for MutexGuard<'a, T> {
