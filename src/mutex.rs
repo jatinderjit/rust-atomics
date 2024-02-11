@@ -26,7 +26,7 @@ unsafe impl<T> Sync for Mutex<T> where T: Send {}
 impl<T> Mutex<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            state: AtomicU32::new(0),
+            state: AtomicU32::new(UNLOCKED),
             data: UnsafeCell::new(data),
         }
     }
@@ -39,7 +39,11 @@ impl<T> Mutex<T> {
         // - this is the winner among all the threads trying to lock. The other
         //   threads will mark the lock as contended, and this thread will know
         //   that it has to `wake` another thread.
-        if self.state.swap(LOCKED_UNCONTENDED, Acquire) != UNLOCKED {
+        if self
+            .state
+            .compare_exchange(UNLOCKED, LOCKED_UNCONTENDED, Acquire, Relaxed)
+            .is_err()
+        {
             self.lock_contended();
         }
         MutexGuard { mutex: self }
