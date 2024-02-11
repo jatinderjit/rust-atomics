@@ -5,4 +5,5 @@ pub mod condvar;
 pub mod mutex;
 pub mod once_data;
 pub mod processor;
+pub mod rwlock;
 pub mod spinlock;
