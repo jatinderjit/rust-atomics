@@ -100,9 +100,7 @@ impl<T> RwLock<T> {
     #[inline]
     fn write_unlock(&self) {
         self.state.store(UNLOCKED, Release);
-        if self.readers.load(Relaxed) > 0 {
-            wake_all(&self.state);
-        }
+        wake_all(&self.state);
     }
 }
 
@@ -231,6 +229,26 @@ mod test {
             let writer = writer.join().unwrap();
             assert!(reader_2 < Duration::from_millis(10));
             assert!(writer > Duration::from_millis(500));
+        });
+    }
+
+    #[test]
+    fn writer_waits_for_writer() {
+        let lock = RwLock::new(0);
+        thread::scope(|s| {
+            let writer = lock.write();
+
+            let writer_2 = s.spawn(|| {
+                let start = Instant::now();
+                let _guard = lock.write();
+                start.elapsed()
+            });
+
+            thread::sleep(Duration::from_millis(500));
+            drop(writer);
+
+            let writer_2 = writer_2.join().unwrap();
+            assert!(writer_2 > Duration::from_millis(500));
         });
     }
 }
